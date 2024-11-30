@@ -1,2 +1,2 @@
 # Customer-Lifecycle-and-Value-Analysis
-Evaluated customer acquisition, retention, and churn rates to assess lifecycle stages and impact. Calculated CLV to identify high-value segments and optimise engagement strategies for long-term profitability.
+Analysed customer acquisition to understand lifecycle stages and their impact on business performance. Calculated Customer Lifetime Value (CLV) using revenue data, providing actionable insights to optimise customer engagement strategies. Identified high-value segments to prioritise retention and drive long-term profitability.
