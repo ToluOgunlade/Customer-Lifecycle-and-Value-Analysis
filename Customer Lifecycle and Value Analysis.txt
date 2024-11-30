@@ -1,0 +1,335 @@
+WITH 
+-- Step 1: Calculate Average Order Value (AOV)
+aov AS (
+    SELECT 
+        DATE_TRUNC(t.date, MONTH) AS month,
+        SUM(t.transaction_revenue) / COUNT(t.transaction_id) AS avg_order_value
+    FROM `prism-insights.prism_acquire.transactions` t
+    WHERE t.date BETWEEN '2020-01-01' AND '2021-12-31'
+    GROUP BY month
+),
+
+-- Step 2: Calculate Purchase Frequency (PF)
+purchase_frequency AS (
+    SELECT 
+        DATE_TRUNC(t.date, MONTH) AS month,
+        COUNT(DISTINCT t.transaction_id) / COUNT(DISTINCT t.user_crm_id) AS purchase_frequency
+    FROM `prism-insights.prism_acquire.transactions` t
+    GROUP BY month
+),
+
+-- Step 3: Calculate Customer Lifespan (CL) for each user (no aggregation yet)
+customer_lifespan AS (
+    SELECT 
+        user_crm_id,
+        DATE_DIFF(MAX(t.date), MIN(t.date), YEAR) AS customer_lifespan
+    FROM `prism-insights.prism_acquire.transactions` t
+    GROUP BY user_crm_id
+),
+
+-- Step 4: Calculate the average customer lifespan for each month
+monthly_lifespan AS (
+    SELECT
+        DATE_TRUNC(t.date, MONTH) AS month,
+        AVG(cl.customer_lifespan) AS avg_customer_lifespan
+    FROM `prism-insights.prism_acquire.transactions` t
+    JOIN customer_lifespan cl ON t.user_crm_id = cl.user_crm_id
+    GROUP BY month
+),
+
+-- Step 5: Calculate CLV for each month
+monthly_clv AS (
+    SELECT 
+        aov.month,
+        aov.avg_order_value,
+        pf.purchase_frequency,
+        ml.avg_customer_lifespan,
+        (aov.avg_order_value * pf.purchase_frequency * ml.avg_customer_lifespan) AS customer_lifetime_value
+    FROM aov
+    JOIN purchase_frequency pf ON aov.month = pf.month
+    JOIN monthly_lifespan ml ON aov.month = ml.month
+)
+
+-- Final result: Show CLV for each month
+SELECT 
+    month,
+    customer_lifetime_value
+FROM monthly_clv
+ORDER BY month;
+--$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$4
+---ROAS
+WITH revenues AS (
+    -- Calculate total revenue for each platform by month
+    SELECT
+        DATE_TRUNC(t.date, MONTH) AS revenue_month,
+        ROUND(SUM(CASE WHEN (s.traffic_source LIKE '%criteo%' AND s.traffic_medium = 'cpc') THEN t.transaction_total END), 2) AS criteo_revenue,
+        ROUND(SUM(CASE WHEN (s.traffic_source LIKE '%facebook%' OR s.traffic_source LIKE '%instagram%' OR s.traffic_source LIKE '%meta%') AND s.traffic_medium = 'cpc' THEN t.transaction_total END), 2) AS meta_revenue,
+        ROUND(SUM(CASE WHEN (s.traffic_source LIKE '%google%' OR s.traffic_source LIKE '%youtube%') AND s.traffic_medium = 'cpc' THEN t.transaction_total END), 2) AS google_revenue,
+        ROUND(SUM(CASE WHEN s.traffic_source LIKE '%rtbhouse%' AND s.traffic_medium = 'cpc' THEN t.transaction_total END), 2) AS rtbhouse_revenue,
+        ROUND(SUM(CASE WHEN s.traffic_source LIKE '%tiktok%' AND s.traffic_medium = 'cpc' THEN t.transaction_total END), 2) AS tiktok_revenue
+    FROM 
+        `prism-insights.warehouse.sessions` AS s
+    INNER JOIN 
+        `prism-insights.warehouse.transactions` AS t
+    USING (session_id)
+    GROUP BY 
+        revenue_month
+),
+costs AS (
+    -- Calculate total ad costs for each platform by month
+    SELECT
+        DATE_TRUNC(ad.date, MONTH) AS cost_month,
+        ROUND(SUM(criteo_cost), 2) AS criteo_cost,
+        ROUND(SUM(google_cost), 2) AS google_cost,
+        ROUND(SUM(meta_cost), 2) AS meta_cost,
+        ROUND(SUM(rtbhouse_cost), 2) AS rtbhouse_cost,
+        ROUND(SUM(tiktok_cost), 2) AS tiktok_cost
+    FROM 
+        `prism-insights.warehouse.adplatform_data` AS ad
+    GROUP BY 
+        cost_month
+)
+-- Calculate ROAS for each platform by month
+SELECT
+    r.revenue_month,
+    ROUND(r.criteo_revenue / NULLIF(c.criteo_cost, 0), 2) AS criteo_roas,
+    ROUND(r.google_revenue / NULLIF(c.google_cost, 0), 2) AS google_roas,
+    ROUND(r.meta_revenue / NULLIF(c.meta_cost, 0), 2) AS meta_roas,
+    ROUND(r.rtbhouse_revenue / NULLIF(c.rtbhouse_cost, 0), 2) AS rtbhouse_roas,
+    ROUND(r.tiktok_revenue / NULLIF(c.tiktok_cost, 0), 2) AS tiktok_roas
+FROM 
+    revenues r
+JOIN 
+    costs c
+ON 
+    r.revenue_month = c.cost_month
+ORDER BY 
+    r.revenue_month;
+
+
+    --conversion rates
+SELECT
+    COUNT(DISTINCT  t.transaction_id) / COUNT(DISTINCT s.session_id) AS conversion_rate
+FROM `prism_acquire.sessions` s
+LEFT JOIN
+    `prism_acquire.transactions` t 
+    ON s.session_id = t.session_id;
+
+    --    return on ad spend
+   WITH revenues AS (
+    SELECT
+        ROUND(SUM(CASE WHEN traffic_source LIKE '%facebook%' OR traffic_source LIKE '%instagram%' THEN transaction_revenue END), 2) AS meta_revenue,
+        ROUND(SUM(CASE WHEN traffic_source LIKE '%google%' THEN transaction_revenue END), 2) AS google_revenue,
+        ROUND(SUM(CASE WHEN traffic_source LIKE '%rtbhouse%' THEN transaction_revenue END), 2) AS rtbhouse_revenue
+    FROM `prism_acquire.sessions` AS s
+    INNER JOIN `prism_acquire.transactions` USING (session_id)
+),
+costs AS (
+    SELECT
+        ROUND(SUM(google_cost), 2) AS google_cost,
+        ROUND(SUM(meta_cost), 2) AS meta_cost,
+        ROUND(SUM(rtbhouse_cost), 2) AS rtbhouse_cost
+    FROM `prism_acquire.adplatform_data`
+)
+SELECT
+    ROUND(revenues.google_revenue / NULLIF(costs.google_cost, 0), 2) AS google_rev_per_cost,
+    ROUND(revenues.meta_revenue / NULLIF(costs.meta_cost, 0), 2) AS meta_rev_per_cost,
+    ROUND(revenues.rtbhouse_revenue / NULLIF(costs.rtbhouse_cost, 0), 2) AS rtbhouse_rev_per_cost
+FROM costs
+CROSS JOIN revenues;
+
+
+--Return rate
+WITH items_sold AS
+ (SELECT transaction_id, SUM(item_quantity) AS quantity_items_sold
+  FROM prism-insights.prism_acquire.transactionsanditems
+  GROUP BY transaction_id),
+
+items_returned AS(
+  SELECT transaction_id, SUM(return_quantity) AS quantity_items_returned
+  FROM prism-insights.prism_acquire.product_returns
+  WHERE return_status = 'Refund'
+  GROUP BY transaction_id
+)
+
+SELECT SUM(quantity_items_returned)/SUM(quantity_items_sold) *100
+FROM items_sold
+LEFT JOIN items_returned
+ON items_sold.transaction_id = items_returned.transaction_id
+;
+
+--click through rate
+SELECT 
+ROUND(SUM(google_clicks) / SUM(google_impressions) * 100, 2) AS google_CTR, 
+ROUND(SUM(meta_clicks) / SUM(meta_impressions) * 100, 2) AS meta_CTR, 
+ROUND(SUM(criteo_clicks) / SUM(criteo_impressions) * 100, 2) AS criteo_CTR, 
+ROUND(SUM(rtbhouse_clicks) / SUM(rtbhouse_impressions) * 100, 2) AS rtbhouse_CTR, 
+ROUND(SUM(tiktok_clicks) / SUM(tiktok_impressions) * 100, 2) AS tiktok_CTR
+FROM prism-insights.prism_acquire.adplatform_data;
+
+--Gross profit margin
+WITH total_revenue AS (
+  SELECT SUM(transaction_total) AS revenue
+  FROM `prism_acquire.transactions`
+),
+cogs AS (
+  SELECT SUM(ti.item_quantity*pc.cost_of_item) AS cog
+  FROM `prism_acquire.transactionsanditems` AS ti
+  LEFT JOIN `prism_acquire.product_costs` AS pc
+  USING (item_id)
+)
+
+SELECT ((revenue - (SELECT cog FROM cogs))/revenue)*100
+FROM total_revenue;
+
+--Revenue
+SELECT 
+EXTRACT(year from date) AS year,
+EXTRACT(month from date) AS month,
+    SUM(transaction_revenue) total_revenue
+FROM  `prism_acquire.transactions`
+GROUP BY year, month
+ORDER BY month ASC, year ASC;
+
+--Organic and non_organic
+WITH totals AS (SELECT 
+  COUNT(CASE WHEN traffic_medium = 'organic' OR traffic_medium = 'organic_social' THEN 1 END) AS organic,
+  COUNT(CASE WHEN traffic_medium != 'organic' OR traffic_medium != 'organic_social' THEN 1 END) AS non_organic
+FROM `prism_acquire.sessions`)
+
+SELECT (organic/non_organic) * 100 AS ratio, organic, non_organic
+FROM totals;
+
+--Retention rate
+WITH monthly_registrations AS (
+  SELECT 
+    user_crm_id,
+    EXTRACT(YEAR FROM registration_date) AS reg_year,
+    EXTRACT(MONTH FROM registration_date) AS reg_month,
+    registration_date,
+    latest_login_date
+  FROM 
+    `prism-insights.prism_acquire.users`
+)
+SELECT 
+  reg_year,
+  reg_month,
+  COUNT(*) AS total_registered,
+  COUNT(CASE WHEN latest_login_date > DATE_ADD(registration_date, INTERVAL 30 DAY) THEN 1 END) AS retained_users,
+  ROUND(COUNT(CASE WHEN latest_login_date > DATE_ADD(registration_date, INTERVAL 30 DAY) THEN 1 END) / COUNT(*) * 100, 2) AS retention_rate
+FROM 
+  monthly_registrations
+GROUP BY 
+  reg_year, reg_month
+ORDER BY
+  reg_year DESC, reg_month DESC;
+
+
+  --volume of unit sold
+SELECT 
+    SUM(item_quantity) AS total_units_sold
+FROM 
+    `prism_acquire.transactionsanditems`
+WHERE 
+    date BETWEEN '2021-01-01' AND '2021-12-31';
+
+--By item
+SELECT 
+    item_id,
+    SUM(item_quantity) AS total_units_sold
+FROM 
+    `prism_acquire.transactionsanditems`
+WHERE 
+    date BETWEEN '2021-01-01' AND '2021-12-31'
+GROUP BY 
+    item_id
+ORDER BY 
+    total_units_sold DESC;
+
+    -- By month
+    SELECT 
+    EXTRACT(MONTH FROM date) AS month,
+    SUM(item_quantity) AS total_units_sold
+FROM 
+    `prism_acquire.transactionsanditems`
+WHERE 
+    date BETWEEN '2021-01-01' AND '2021-12-31'
+GROUP BY 
+    EXTRACT(MONTH FROM date)
+ORDER BY 
+    month;
+
+--&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&7
+--Customer Acquisition by devices
+SELECT 
+  event_name, device_category,
+  COUNT(DISTINCT user_crm_id) AS acquired_customers
+FROM
+  `warehouse.funnel_events`
+  WHERE event_name = 'view_item' 
+  GROUP BY
+  event_name, device_category;
+
+  --Customer Acquisition by time year, month
+  SELECT  
+  event_name, 
+  device_category,
+  DATE_TRUNC(date, MONTH) AS acquisition_month, -- Grouping by month for time-based acquisition
+  COUNT(DISTINCT user_crm_id) AS acquired_customers
+FROM
+  `warehouse.funnel_events`
+WHERE 
+  event_name = 'view_item'  -- Specify the acquisition event
+GROUP BY
+  event_name, 
+  device_category, 
+  acquisition_month -- Group by time (acquisition month)
+ORDER BY 
+  acquisition_month;
+
+--Cutomer Acquisition according to channel(cost, clicks, impressions)
+SELECT  
+  fe.event_name, 
+  fe.device_category,
+  ap.platform,  -- Platform information
+  SUM(ap.impressions) AS total_impressions,  -- Total impressions per platform
+  SUM(ap.clicks) AS total_clicks,  -- Total clicks per platform
+  SUM(ap.cost) AS total_cost,  -- Total cost per platform
+  COUNT(DISTINCT fe.user_crm_id) AS acquired_customers,  -- Total unique acquired customers
+  (SUM(pm.cost) / COUNT(DISTINCT fe.user_crm_id)) AS cost_per_acquisition  -- Cost per acquisition (CPA)
+FROM
+  `warehouse.funnel_events` AS fe
+LEFT JOIN 
+  `warehouse.adplatform` AS ap
+ON 
+  fe.user_crm_id = pm.user_crm_id  -- Joining on user ID or some common field
+WHERE 
+  fe.event_name = 'view_item'  -- Specify the acquisition event
+GROUP BY
+  fe.event_name, 
+  fe.device_category, 
+  ap.platform  -- Group by platform and device category
+ORDER BY 
+  total_impressions DESC;
+
+  SELECT
+
+   ROUND(COALESCE(google_clicks, 0) / COALESCE(google_impressions, 0), 2) * 100 AS ctr_google,
+
+ROUND(COALESCE(meta_clicks, 0) / COALESCE(meta_impressions, 0), 2) * 100 AS ctr_meta,
+ 
+ ROUND(COALESCE(rtbhouse_clicks, 0) / COALESCE(rtbhouse_impressions, 0), 2) *100 AS ctr_rtbhouse,
+
+COUNT(*)
+   
+FROM 
+    `prism_acquire.adplatform_data`
+WHERE 
+    date BETWEEN '2021-01-01' AND '2021-12-31'
+   GROUP BY ctr_google, ctr_meta,ctr_rtbhouse;
+
+   SELECT EXTRACT(MONTH FROM date) AS prism_month, 
+ROUND(SUM(criteo_cost), 2), ROUND(SUM(google_cost), 2),ROUND(SUM(meta_cost), 2), ROUND(SUM(rtbhouse_cost), 2), ROUND(SUM(rtbhouse_cost), 2),ROUND(SUM(tiktok_cost), 2)
+FROM `prism_acquire.adplatform_data`
+WHERE date BETWEEN '2021-01-01' AND '2021-12-31'
+GROUP BY prism_month;
